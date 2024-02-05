@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
+import json
 
 import matplotlib
 import os
 import random
+import stat
 import sys
 import time
 import traceback
@@ -15,6 +17,28 @@ try:
     from PIL import Image
 except ImportError:
     import Image
+
+
+def mkdir(path,
+          mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
+    if not os.path.exists(path):
+        os.mkdir(path, mode)
+
+    chmod(path, mode)
+
+
+def chmod(path,
+          mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
+    if os.path.exists(path):
+        try:
+            os.chmod(path, mode)
+        except PermissionError as e:
+            print(e)
+
+
+def remove(path):
+    if os.path.exists(path):
+        os.remove(path)
 
 
 def adjust_alpha(img, alpha_factor):
@@ -154,7 +178,7 @@ def reduce(img_path1, img_path2, size1, size2, angle, padding, direction, alpha_
     return img
 
 
-def create_random_image(width, height, max_width=100, max_height=100):
+def create_random_image(width, height, max_width=16, max_height=16):
     if width > max_width or height > max_height:
         size = (max_width, max_height)
         resize_needed = True
@@ -229,22 +253,149 @@ def save_config_as_yolo(yolo_path, rect, config):
         fp.write(content)
 
 
-def test(img_path1, img_path2, saved_img_path, saved_config_path):
+def save_classes_as_yolo(dir_name, classes):
+    yolo_path = os.path.join(dir_name, 'labels/classes.txt')
+    with open(yolo_path, 'w+') as fp:
+        fp.write('\n'.join(classes))
+
+
+def create_one(saved_dir, index, path_name1, path_name2, config, global_cfg):
+    sizes = global_cfg['size-ranges']
+    paddings = global_cfg['padding-ranges']
+    alpha_factors = global_cfg['alpha-ranges']
+    background_size = global_cfg['background-size']
+
+    angles = global_cfg['angles']
+
+    w1 = random.randint(sizes[0][0], sizes[1][0])
+    w2 = random.randint(sizes[0][0], sizes[1][0])
+    h1 = random.randint(sizes[0][1], sizes[1][1])
+    h2 = random.randint(sizes[0][1], sizes[1][1])
+
+    size1 = (w1, h1)
+    size2 = (w2, h2)
+
+    padding = random.randint(paddings[0], paddings[1])
+    alpha_factor = random.randint(alpha_factors[0], alpha_factors[1])
+
+    angle_index = random.randint(0, len(angles) - 1)
+    angle = angles[angle_index]
+
+    x = random.randint(0, background_size[0] - 1)
+    y = random.randint(0, background_size[1] - 1)
+
+    config['image-sizes'] = [size1, size2]
+    config['angle'] = angle
+    config['padding'] = padding
+    config['alpha'] = alpha_factor
+    config['overlay-start'] = (x, y)
+
+    basename = '{}-{}'.format(str(index).zfill(8), config['name'])
+
+    image_path = os.path.join(saved_dir, 'images/{}.png'.format(basename))
+    label_path = os.path.join(saved_dir, 'labels/{}.txt'.format(basename))
+
+    img, rect = combine_image_files(image_path, path_name1, path_name2, config)
+    save_config_as_yolo(label_path, rect, config)
+
+    print('Save {}'.format(basename))
+
+
+def create_group(saved_dir, dir_name1, dir_name2, config, global_cfg):
+    path_names1 = get_image_files(dir_name1)
+    path_names2 = get_image_files(dir_name2)
+
+    if not path_names1 or not path_names2:
+        return
+
+    repeated_times = global_cfg['repeated-times']
+
+    index = 0
+    for path_name1 in path_names1:
+        for path_name2 in path_names2:
+            for i in range(repeated_times):
+                create_one(saved_dir, index, path_name1, path_name2, config, global_cfg)
+                index += 1
+
+
+def load_config(config_file):
+    with open(config_file) as fp:
+        return json.loads(fp.read())
+
+
+def get_sub_dirs(dir_name):
+    path_names = list()
+    for filename in os.listdir(dir_name):
+
+        pathname = os.path.join(dir_name, filename)
+        if os.path.isdir(pathname):
+            path_names.append(pathname)
+
+    return path_names
+
+
+def get_image_files(dir_name):
+    def get_file_suffix(file_name):
+        pos = file_name.rfind('.')
+
+        if pos < 0:
+            return ''
+
+        return file_name[pos + 1:].lower()
+
+    path_names = list()
+    for filename in os.listdir(dir_name):
+
+        pathname = os.path.join(dir_name, filename)
+        if not os.path.isfile(pathname):
+            continue
+
+        suffix = get_file_suffix(filename)
+        if suffix not in ['jpg', 'png', 'webp', 'jpeg']:
+            continue
+
+        path_names.append(pathname)
+
+    return path_names
+
+
+def create(config_file):
+    saved_dir = os.path.dirname(config_file)
+
+    mkdir(os.path.join(saved_dir, 'images'))
+    mkdir(os.path.join(saved_dir, 'labels'))
+
+    global_cfg = load_config(config_file)
+
+    dir_names = global_cfg['dir-names']
+
+    sub_dirs1 = get_sub_dirs(os.path.join(saved_dir, dir_names[0]))
+    sub_dirs2 = get_sub_dirs(os.path.join(saved_dir, dir_names[1]))
+
     config = dict()
-    config['id'] = 1
-    config['name'] = 'a lovely dog'
-    config['background-size'] = (400, 400)
-    config['image-sizes'] = [(40, 60), (80, 80)]
-    config['angle'] = 150
-    config['padding'] = 15
-    config['direction'] = 'vertical'
-    config['alpha'] = 80
-    config['overlay-start'] = (100, 200)
 
-    img, rect = combine_image_files(saved_img_path, img_path1, img_path2, config)
-    img.show()
+    background_size = global_cfg['background-size']
+    direction = global_cfg['direction']
 
-    save_config_as_yolo(saved_config_path, rect, config)
+    config['background-size'] = background_size
+    config['direction'] = direction
+
+    index = 0
+    names = []
+
+    for sub_dir1 in sub_dirs1:
+        for sub_dir2 in sub_dirs2:
+            config['id'] = index
+            name = '{}-{}'.format(os.path.basename(sub_dir1),
+                                  os.path.basename(sub_dir2))
+            config['name'] = name
+            names.append(name)
+
+            create_group(saved_dir, sub_dir1, sub_dir2, config, global_cfg)
+
+            index += 1
+
+    save_classes_as_yolo(saved_dir, names)
 
 
 def main(argv):
@@ -253,7 +404,7 @@ def main(argv):
 
     try:
         print('Now: ', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        test(argv[1], argv[2], argv[3], argv[4])
+        create(argv[1])
     except KeyboardInterrupt:
         pass
     except Exception as e:
