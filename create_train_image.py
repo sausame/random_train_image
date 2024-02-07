@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
-import json
 
+import json
 import matplotlib
 import os
 import random
@@ -9,12 +9,13 @@ import stat
 import sys
 import time
 import traceback
+import yaml
 
 from datetime import datetime
 from randimage import get_random_image, show_array
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError:
     import Image
 
@@ -113,19 +114,19 @@ def strip_image(img):
     return new_img
 
 
-def strip_image_file(image_file):
-    img = Image.open(image_file)
-    return strip_image(img)
-
-
-def refine_image(img, size):
+def refine_image(img, size, scale_by, scale_keeping_ratio):
     new_img = strip_image(img)
-    return new_img.resize(size)
 
+    w1, h1 = size
+    if scale_keeping_ratio:
+        w0, h0 = img.size
 
-def refine_image_file(image_file, size):
-    img = Image.open(image_file)
-    return refine_image(img, size)
+        if 'horizontal' == scale_by:
+            h1 = int(h0 * w1 / w0)
+        elif 'vertical' == scale_by:
+            w1 = int(w0 * h1 / h0)
+
+    return new_img.resize((w1, h1))
 
 
 def concat_vertical(img1, img2, padding):
@@ -161,12 +162,14 @@ def concat(img1, img2, padding, direction):
     return concat_horizontal(img1, img2, padding)
 
 
-def reduce(img_path1, img_path2, size1, size2, angle, padding, direction, alpha_factor=100):
+def reduce(img_path1, img_path2, size1, size2,
+           scale_by, scale_keeping_ratio,
+           angle, padding, direction, alpha_factor=100):
     img1 = load_image(img_path1)
     img2 = load_image(img_path2)
 
-    img3 = refine_image(img1, size1)
-    img4 = refine_image(img2, size2)
+    img3 = refine_image(img1, size1, scale_by, scale_keeping_ratio)
+    img4 = refine_image(img2, size2, scale_by, scale_keeping_ratio)
 
     img5 = concat(img3, img4, padding, direction)
     img6 = img5.rotate(angle, expand=True)
@@ -178,7 +181,7 @@ def reduce(img_path1, img_path2, size1, size2, angle, padding, direction, alpha_
     return img
 
 
-def create_random_image(width, height, max_width=16, max_height=16):
+def create_random_complex_image(width, height, max_width=16, max_height=16):
     if width > max_width or height > max_height:
         size = (max_width, max_height)
         resize_needed = True
@@ -199,6 +202,20 @@ def create_random_image(width, height, max_width=16, max_height=16):
     return img
 
 
+def create_random_simple_image(width, height, max_number=10000):
+    img = Image.new("RGBA", (width, height))
+    draw = ImageDraw.Draw(img)
+
+    # Generate and test random pixels
+    for _ in range(max_number):
+        x = random.randint(0, width - 1)
+        y = random.randint(0, height - 1)
+        color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        draw.point((x, y), fill=color)
+
+    return img
+
+
 def combine(background, overlay, left, top):
     new_overlay = Image.new('RGBA', background.size)
     new_overlay.paste(overlay, (left, top), mask=overlay)
@@ -207,9 +224,24 @@ def combine(background, overlay, left, top):
     return img
 
 
-def combine_image_files(saved_path, img_path1, img_path2, config):
+def combine_image_files(saved_dir, saved_path, img_path1, img_path2, config):
+    background_type = config['background-type']
     bg_size = config['background-size']
-    background = create_random_image(bg_size[0], bg_size[1])
+
+    if 'image' == background_type:
+        background_image = config['background-image']
+        path_name = os.path.join(saved_dir, background_image)
+        img = load_image(path_name)
+        background = img.resize((bg_size[0], bg_size[1]))
+    elif 'random-image' == background_type:
+        background_random_image = config['background-random-image']
+        if 'simple' == background_random_image:
+            background = create_random_simple_image(bg_size[0], bg_size[1])
+        elif 'complex' == background_random_image:
+            background = create_random_complex_image(bg_size[0], bg_size[1])
+
+    scale_by = config['scale-by']
+    scale_keeping_ratio = config['scale-keeping-ratio']
 
     image_sizes = config['image-sizes']
     img_size1 = image_sizes[0]
@@ -220,7 +252,9 @@ def combine_image_files(saved_path, img_path1, img_path2, config):
     direction = config['direction']
     alpha_factor = config['alpha']
 
-    overlay = reduce(img_path1, img_path2, img_size1, img_size2, angle, padding, direction, alpha_factor)
+    overlay = reduce(img_path1, img_path2, img_size1, img_size2,
+                     scale_by, scale_keeping_ratio,
+                     angle, padding, direction, alpha_factor)
 
     pos = config['overlay-start']
     left = pos[0]
@@ -253,55 +287,94 @@ def save_config_as_yolo(yolo_path, rect, config):
         fp.write(content)
 
 
-def save_classes_as_yolo(dir_name, classes):
-    yolo_path = os.path.join(dir_name, 'labels/classes.txt')
-    with open(yolo_path, 'w+') as fp:
+def save_config_files_as_yolo(dir_name, new_classes, start_index):
+    classes_path = os.path.join(dir_name, 'labels/classes.txt')
+
+    if os.path.exists(classes_path):
+        with open(classes_path, 'r') as fp:
+            classes = fp.read().split('\n')
+    else:
+        classes = list()
+
+    existing_end_index = len(classes)
+    end_index = start_index + len(new_classes)
+    if existing_end_index >= end_index:
+        for index in range(start_index, end_index):
+            classes[index] = new_classes[index - start_index]
+    else:
+        if existing_end_index < start_index:
+            empty_classes = ['' for _ in range(existing_end_index, start_index)]
+            classes.extend(empty_classes)
+
+        classes.extend(new_classes)
+
+    with open(classes_path, 'w+') as fp:
         fp.write('\n'.join(classes))
 
+    yaml_path = os.path.join(dir_name, 'data.yaml')
+    data = {
+        'path': 'ROOT-PATH',
+        'train': 'images',
+        'val': 'images',
+        'names': classes
+    }
 
-def create_one(saved_dir, index, path_name1, path_name2, config, global_cfg):
+    # 打开一个文件用于写入
+    with open(yaml_path, 'w+') as fp:
+        yaml.dump(data, fp)
+
+
+def create_one(saved_dir, prefix, path_name1, path_name2, config, global_cfg):
+    config['scale-by'] = global_cfg['scale-by']
+    config['scale-keeping-ratio'] = global_cfg['scale-keeping-ratio']
+
     sizes = global_cfg['size-ranges']
-    paddings = global_cfg['padding-ranges']
-    alpha_factors = global_cfg['alpha-ranges']
-    background_size = global_cfg['background-size']
 
-    angles = global_cfg['angles']
+    w1 = random.randint(sizes[0], sizes[1])
+    h1 = random.randint(sizes[0], sizes[1])
 
-    w1 = random.randint(sizes[0][0], sizes[1][0])
-    w2 = random.randint(sizes[0][0], sizes[1][0])
-    h1 = random.randint(sizes[0][1], sizes[1][1])
-    h2 = random.randint(sizes[0][1], sizes[1][1])
+    scale_simultaneously = global_cfg['scale-simultaneously']
+    if not scale_simultaneously:
+        w2 = random.randint(sizes[0], sizes[1])
+        h2 = random.randint(sizes[0], sizes[1])
+    else:
+        w2 = w1
+        h2 = h1
 
     size1 = (w1, h1)
     size2 = (w2, h2)
-
-    padding = random.randint(paddings[0], paddings[1])
-    alpha_factor = random.randint(alpha_factors[0], alpha_factors[1])
-
-    angle_index = random.randint(0, len(angles) - 1)
-    angle = angles[angle_index]
-
-    x = random.randint(0, background_size[0] - 1)
-    y = random.randint(0, background_size[1] - 1)
-
     config['image-sizes'] = [size1, size2]
-    config['angle'] = angle
-    config['padding'] = padding
-    config['alpha'] = alpha_factor
+
+    paddings = global_cfg['padding-ranges']
+    config['padding'] = random.randint(paddings[0], paddings[1])
+
+    alpha_factors = global_cfg['alpha-ranges']
+    config['alpha'] = random.randint(alpha_factors[0], alpha_factors[1])
+
+    angles = global_cfg['angles']
+    config['angle'] = angles[random.randint(0, len(angles) - 1)]
+
+    config['background-type'] = global_cfg['background-type']
+    config['background-image'] = global_cfg['background-image']
+    config['background-random-image'] = global_cfg['background-random-image']
+
+    overlay_size = global_cfg['overlay-sizes']
+    x = random.randint(overlay_size[0], overlay_size[1])
+    y = random.randint(overlay_size[0], overlay_size[1])
     config['overlay-start'] = (x, y)
 
-    basename = '{}-{}'.format(str(index).zfill(8), config['name'])
+    basename = '{}-{}'.format(prefix, config['name'])
 
     image_path = os.path.join(saved_dir, 'images/{}.png'.format(basename))
     label_path = os.path.join(saved_dir, 'labels/{}.txt'.format(basename))
 
-    img, rect = combine_image_files(image_path, path_name1, path_name2, config)
+    img, rect = combine_image_files(saved_dir, image_path, path_name1, path_name2, config)
     save_config_as_yolo(label_path, rect, config)
 
     print('Save {}'.format(basename))
 
 
-def create_group(saved_dir, dir_name1, dir_name2, config, global_cfg):
+def create_group(saved_dir, index, dir_name1, dir_name2, config, global_cfg):
     path_names1 = get_image_files(dir_name1)
     path_names2 = get_image_files(dir_name2)
 
@@ -310,12 +383,13 @@ def create_group(saved_dir, dir_name1, dir_name2, config, global_cfg):
 
     repeated_times = global_cfg['repeated-times']
 
-    index = 0
+    count = 0
     for path_name1 in path_names1:
         for path_name2 in path_names2:
             for i in range(repeated_times):
-                create_one(saved_dir, index, path_name1, path_name2, config, global_cfg)
-                index += 1
+                prefix = str(index).zfill(4) + str(count).zfill(4)
+                create_one(saved_dir, prefix, path_name1, path_name2, config, global_cfg)
+                count += 1
 
 
 def load_config(config_file):
@@ -380,7 +454,7 @@ def create(config_file):
     config['background-size'] = background_size
     config['direction'] = direction
 
-    index = 0
+    index = global_cfg['index']
     names = []
 
     for sub_dir1 in sub_dirs1:
@@ -391,16 +465,22 @@ def create(config_file):
             config['name'] = name
             names.append(name)
 
-            create_group(saved_dir, sub_dir1, sub_dir2, config, global_cfg)
+            create_group(saved_dir, index, sub_dir1, sub_dir2, config, global_cfg)
 
             index += 1
 
-    save_classes_as_yolo(saved_dir, names)
+    save_config_files_as_yolo(saved_dir, names, global_cfg['index'])
+
+    print(len(names), 'names have been created.')
 
 
 def main(argv):
     os.environ['TZ'] = 'Asia/Shanghai'
     time.tzset()
+
+    if len(argv) < 2:
+        print('Usage:\n\t', argv[0], 'CONFIG-PATH-NAME\n')
+        return
 
     try:
         print('Now: ', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
