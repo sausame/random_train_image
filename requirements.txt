@@ -1,0 +1,10 @@
+# Requirements
+# Usage: pip install -r requirements.txt
+
+gitpython>=3.1.30
+matplotlib>=3.3
+numpy>=1.23.5
+Pillow>=9.5.0
+PyYAML>=5.3.1
+requests>=2.23.0
+randimage>=1.0
